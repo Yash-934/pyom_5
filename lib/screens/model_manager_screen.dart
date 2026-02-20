@@ -227,12 +227,7 @@ class _ModelManagerScreenState extends State<ModelManagerScreen> {
 
     try {
       final result = await FilePicker.platform.pickFiles(
-        // Use FileType.any so Android shows ALL files including .gguf
-        // which Android doesn't have a registered MIME type for
-        type: FileType.any,
-        allowMultiple: false,
-        withData: false,
-        withReadStream: false,
+        
       );
 
       if (result == null || result.files.isEmpty) return;

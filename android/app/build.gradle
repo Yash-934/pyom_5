@@ -15,7 +15,7 @@ def flutterVersionName = localProperties.getProperty('flutter.versionName') ?: '
 
 android {
     namespace "com.pyom"
-    compileSdkVersion 34
+    compileSdkVersion 36
     ndkVersion flutter.ndkVersion
 
     compileOptions {
@@ -61,5 +61,6 @@ dependencies {
     implementation 'androidx.core:core-ktx:1.12.0'
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'androidx.documentfile:documentfile:1.0.1'
-    // ✅ NO commons-compress — using Android's built-in tar command instead
+    implementation 'org.apache.commons:commons-compress:1.26.1'
+    implementation 'com.google.android.play:core:1.10.3'
 }

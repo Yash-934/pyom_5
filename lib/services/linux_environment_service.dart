@@ -270,7 +270,7 @@ output = llm("$escapedPrompt", max_tokens=$maxTokens, temperature=$temperature, 
 print(output['choices'][0]['text'], end='')
 ''';
 
-    return executePythonCode(script, timeout: const Duration(minutes: 30));
+    return executePythonCode(script);
   }
 
   // ─── GALLERY / FILE OPERATIONS ────────────────────────────────────────────

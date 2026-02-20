@@ -123,8 +123,11 @@ class LinuxEnvironmentProvider extends ChangeNotifier {
     notifyListeners();
     try {
       final result = await _service.installPackage(packageName, version: version);
-      if (result.isSuccess) await _loadInstalledPackages();
-      else _errorMessage = result.error;
+      if (result.isSuccess) {
+        await _loadInstalledPackages();
+      } else {
+        _errorMessage = result.error;
+      }
       return result;
     } catch (e) {
       _errorMessage = e.toString();

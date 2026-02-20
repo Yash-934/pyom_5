@@ -190,7 +190,7 @@ class _SetupScreenState extends State<SetupScreen> {
             SizedBox(
               width: 100, height: 100,
               child: isDone
-                ? Icon(Icons.check_circle, size: 80, color: Colors.green)
+                ? const Icon(Icons.check_circle, size: 80, color: Colors.green)
                 : isError
                   ? Icon(Icons.error, size: 80, color: theme.colorScheme.error)
                   : CircularProgressIndicator(
@@ -264,18 +264,18 @@ class _SetupScreenState extends State<SetupScreen> {
                   color: theme.colorScheme.surfaceContainerHighest,
                   borderRadius: BorderRadius.circular(8),
                 ),
-                child: Column(
+                child: const Column(
                   children: [
                     Row(children: [
-                      const Icon(Icons.timer, size: 16),
-                      const SizedBox(width: 6),
-                      const Text('This takes ~10-20 minutes on first setup'),
+                      Icon(Icons.timer, size: 16),
+                      SizedBox(width: 6),
+                      Text('This takes ~10-20 minutes on first setup'),
                     ]),
-                    const SizedBox(height: 4),
+                    SizedBox(height: 4),
                     Row(children: [
-                      const Icon(Icons.wifi, size: 16),
-                      const SizedBox(width: 6),
-                      const Text('Keep the app open and WiFi connected'),
+                      Icon(Icons.wifi, size: 16),
+                      SizedBox(width: 6),
+                      Text('Keep the app open and WiFi connected'),
                     ]),
                   ],
                 ),
