@@ -41,13 +41,11 @@ class MainActivity : FlutterActivity() {
     private var currentProcess: Process? = null
     private val isSetupCancelled = AtomicBoolean(false)
 
-    private val envRoot get() = File(filesDir, "linux_env")
-    private val binDir  get() = File(filesDir, "bin")
-
-    // --- Path to the executable proot binary ---
-    private val prootPath: String
-        get() = applicationInfo.nativeLibraryDir + "/libproot.so"
-
+    // Linux rootfs MUST live on external storage — /data is mounted noexec on
+    // Android 10+, so any binary extracted there cannot be execve()'d by proot.
+    // getExternalFilesDir() → /sdcard/Android/data/com.pyom/files/ (NOT noexec)
+    private val envRoot get() = File(getExternalFilesDir(null) ?: filesDir, "linux_env")
+    private val binDir  get() = File(filesDir, "bin")  // proot binary itself lives in nativeLibraryDir, this is just for metadata
 
     // ─── proot version file (for self-update tracking) ───────────────────────
     private val prootVersionFile get() = File(binDir, "proot.version")
@@ -148,7 +146,7 @@ class MainActivity : FlutterActivity() {
     private fun checkProotUpdate(result: MethodChannel.Result) {
         executor.execute {
             try {
-                val proot = File(prootPath)
+                val proot = File(binDir, "proot")
                 if (!proot.exists()) { mainHandler.post { result.success(mapOf("updated" to false, "reason" to "proot not installed")) }; return@execute }
 
                 // Query GitHub API for latest release
@@ -172,15 +170,22 @@ class MainActivity : FlutterActivity() {
                     val downloadUrl = match.groupValues[1]
                     val installedVersion = prootVersionFile.takeIf { it.exists() }?.readText()?.trim() ?: "unknown"
 
-                    // Extract version from URL e.g. "v5.3.0" -> "5.3.0"
+                    // Extract version from URL e.g. "v5.3.0" → "5.3.0"
                     val versionMatch = Regex("download/v([\\d.]+)/").find(downloadUrl)
                     val latestVersion = versionMatch?.groupValues?.get(1) ?: "unknown"
 
                     if (latestVersion != installedVersion && latestVersion != "unknown") {
-                        // NOTE: This will NOT work on Android 10+ as we can't write to nativeLibraryDir.
-                        // This logic is kept for older Android versions or future work.
-                        mainHandler.post { result.success(mapOf("updated" to false, "reason" to "Auto-update disabled on modern Android. Found version $latestVersion.")) }
-                        return@execute
+                        // Download new version silently
+                        val tmpFile = File(binDir, "proot.tmp")
+                        downloadFile(downloadUrl, tmpFile)
+                        if (tmpFile.length() > 10000) {
+                            tmpFile.renameTo(proot)
+                            proot.setExecutable(true, false)
+                            prootVersionFile.writeText(latestVersion)
+                            mainHandler.post { result.success(mapOf("updated" to true, "version" to latestVersion)) }
+                            return@execute
+                        }
+                        tmpFile.delete()
                     }
                 }
                 mainHandler.post { result.success(mapOf("updated" to false, "version" to (prootVersionFile.takeIf { it.exists() }?.readText()?.trim() ?: "unknown"))) }
@@ -202,28 +207,22 @@ class MainActivity : FlutterActivity() {
                 val envDir = File(envRoot, envId); envDir.mkdirs()
 
                 // ── Step 1: proot binary ──────────────────────────────────
-                val prootFile = File(prootPath)
+                val prootFile = File(binDir, "proot")
                 if (!prootFile.exists() || prootFile.length() < 10000) {
-                    sendProgress("proot binary not found in native libs. This is a critical error.", 0.04)
-                    // On modern Android, we cannot download to an executable location.
-                    // The app must be bundled with the proot binary in jniLibs.
-                    // We will attempt the legacy download for older Android versions.
-                    getProot(File(binDir, "proot")) // Download to legacy path
-                     if (!prootFile.exists() && !File(binDir, "proot").exists()) {
-                         throw Exception("proot not found in native library dir and download failed. Please reinstall app.")
-                     }
+                    sendProgress("Getting proot binary…", 0.04)
+                    getProot(prootFile)
                 } else {
                     sendProgress("proot already ready ✅", 0.06)
-                    prootVersionFile.writeText("bundled-native")
+                    // Silently check for update in background
+                    executor.execute { tryUpdateProot(prootFile) }
                 }
-
 
                 if (isSetupCancelled.get()) { mainHandler.post { result.error("CANCELLED", "Cancelled", null) }; return@execute }
 
                 // ── Step 2: Download rootfs ───────────────────────────────
                 val arch = getAndroidArch()
                 val rootfsUrl = if (distro == "ubuntu") getUbuntuUrl(arch) else getAlpineUrl(arch)
-                val tarFile = File(filesDir, "rootfs_${envId}.tar.gz")
+                val tarFile = File(getExternalFilesDir(null) ?: filesDir, "rootfs_${envId}.tar.gz") // Download to external storage (not noexec)
 
                 sendProgress("Downloading $distro Linux…", 0.10)
                 downloadWithProgress(rootfsUrl, tarFile, 0.10, 0.62)
@@ -273,23 +272,46 @@ class MainActivity : FlutterActivity() {
     private fun getProot(dest: File) {
         val arch = getAndroidArch()
 
-        // This function is now a LEGACY FALLBACK for older Android versions.
-        // It downloads to a non-native-lib directory.
-
-        // ── 1. Try APK assets first (old bundled location) ───────────────
+        // ── 1. Try APK assets first (bundled at CI build time) ───────────────
         val assetName = if (arch == "x86_64") "bin/proot-x86_64" else "bin/proot-arm64"
         try {
             assets.open(assetName).use { input -> FileOutputStream(dest).use { input.copyTo(it) } }
             dest.setExecutable(true, false)
             if (dest.length() > 10000) {
-                prootVersionFile.writeText("bundled-legacy")
+                prootVersionFile.writeText("bundled")
                 sendProgress("✅ proot loaded from app (no download needed)", 0.08)
                 return
             }
             dest.delete()
         } catch (_: Exception) { /* not bundled, download below */ }
 
-        // ── 2. Try hardcoded sources with format-aware extraction ───────────
+        // ── 2. Try GitHub API to find latest release with binaries ───────────
+        sendProgress("Checking GitHub for proot binary…", 0.05)
+        try {
+            val apiJson = httpGet("https://api.github.com/repos/proot-me/proot/releases")
+            val archName = if (arch == "x86_64") "x86_64" else "aarch64"
+
+            // Find first release that has a pre-built binary for our arch
+            val urlPattern = Regex("\"browser_download_url\":\\s*\"(https://[^\"]*proot[^\"]*$archName[^\"]*)\"")
+            val match = urlPattern.find(apiJson)
+            if (match != null) {
+                val url = match.groupValues[1]
+                sendProgress("Found proot binary: $url", 0.06)
+                val tmp = File(binDir, "proot.tmp")
+                downloadFile(url, tmp)
+                if (tmp.length() > 10000) {
+                    tmp.renameTo(dest); dest.setExecutable(true, false)
+                    // Extract version from URL
+                    val ver = Regex("download/v([\\d.]+)/").find(url)?.groupValues?.get(1) ?: "unknown"
+                    prootVersionFile.writeText(ver)
+                    sendProgress("✅ proot $ver downloaded", 0.09)
+                    return
+                }
+                tmp.delete()
+            }
+        } catch (_: Exception) { /* fall through to hardcoded sources */ }
+
+        // ── 3. Try hardcoded sources with format-aware extraction ────────────
         val sources = getProotSources(arch)
         val errors = mutableListOf<String>()
 
@@ -302,12 +324,22 @@ class MainActivity : FlutterActivity() {
 
                 val success = when (format) {
                     "binary" -> {
+                        // Direct binary — just rename if valid
                         if (tmp.length() > 10000) { tmp.renameTo(dest); true }
                         else { tmp.delete(); false }
                     }
-                    "tar.gz", "tgz" -> extractBinaryFromTarGz(tmp, dest, listOf("proot", "usr/bin/proot", "bin/proot"))
-                    "zip" -> extractBinaryFromZip(tmp, dest, listOf("proot", "usr/bin/proot", "bin/proot"))
-                    "deb" -> extractBinaryFromDeb(tmp, dest)
+                    "tar.gz", "tgz" -> {
+                        // Extract proot binary from tar.gz
+                        extractBinaryFromTarGz(tmp, dest, listOf("proot", "usr/bin/proot", "bin/proot"))
+                    }
+                    "zip" -> {
+                        extractBinaryFromZip(tmp, dest, listOf("proot", "usr/bin/proot", "bin/proot"))
+                    }
+                    "deb" -> {
+                        // .deb = ar archive containing data.tar.xz
+                        // Simplest approach: extract data.tar.* from it
+                        extractBinaryFromDeb(tmp, dest)
+                    }
                     else -> { tmp.delete(); false }
                 }
                 tmp.delete()
@@ -323,13 +355,43 @@ class MainActivity : FlutterActivity() {
                 errors.add("Source ${index + 1}: ${e.message?.take(80)}")
             }
         }
-        throw Exception("Could not get proot from any source.\nErrors:\n${errors.joinToString("\n")}")
+
+        // All sources failed
+        throw Exception(
+            "Could not get proot from any source.\n" +
+            "Errors:\n${errors.joinToString("\n")}\n\n" +
+            "Fix: See assets/bin/README.md for manual install steps."
+        )
     }
 
     // ── Background update check (non-blocking) ──────────────────────────────
     private fun tryUpdateProot(prootFile: File) {
-       // This function is now mostly disabled on modern Android.
-        return
+        try {
+            val installedVersion = prootVersionFile.takeIf { it.exists() }?.readText()?.trim() ?: return
+            if (installedVersion == "bundled") return // Don't overwrite bundled proot
+
+            val arch = getAndroidArch()
+            val archName = if (arch == "x86_64") "x86_64" else "aarch64"
+            val apiJson = httpGet("https://api.github.com/repos/proot-me/proot/releases")
+            val urlPattern = Regex("\"browser_download_url\":\\s*\"(https://[^\"]*proot[^\"]*$archName[^\"]*)\"")
+            val match = urlPattern.find(apiJson) ?: return
+            val url = match.groupValues[1]
+            val latestVer = Regex("download/v([\\d.]+)/").find(url)?.groupValues?.get(1) ?: return
+
+            if (latestVer == installedVersion) return // Already up to date
+
+            val tmp = File(binDir, "proot_update.tmp")
+            downloadFile(url, tmp)
+            if (tmp.length() > 10000) {
+                tmp.renameTo(prootFile)
+                prootFile.setExecutable(true, false)
+                prootVersionFile.writeText(latestVer)
+                // Notify Flutter
+                mainHandler.post {
+                    methodChannel.invokeMethod("onProotUpdated", mapOf("version" to latestVer))
+                }
+            } else { tmp.delete() }
+        } catch (_: Exception) { /* Silent fail — not critical */ }
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -390,11 +452,17 @@ class MainActivity : FlutterActivity() {
      * Simpler: just try to extract any tar.gz embedded in the .deb.
      */
     private fun extractBinaryFromDeb(deb: File, dest: File): Boolean {
+        // A .deb is an `ar` archive. The data section starts with the ar member header.
+        // We use a simplified approach: scan for gzip magic (1f 8b) in the file
+        // then try to parse from that offset as tar.gz.
         try {
             val bytes = deb.readBytes()
+            // Find gzip magic bytes (1f 8b) — this marks the start of data.tar.gz
             var offset = -1
             for (i in 0 until bytes.size - 1) {
                 if (bytes[i] == 0x1f.toByte() && bytes[i + 1] == 0x8b.toByte()) {
+                    // Skip the first gzip we find (might be control.tar.gz — small)
+                    // Try parsing as tar.gz from here
                     val tmpTar = File(binDir, "deb_extract.tmp")
                     tmpTar.writeBytes(bytes.copyOfRange(i, bytes.size))
                     val found = extractBinaryFromTarGz(tmpTar, dest, listOf("proot", "usr/bin/proot", "./usr/bin/proot"))
@@ -522,14 +590,10 @@ class MainActivity : FlutterActivity() {
 
     private fun runCommandInProot(envId: String, command: String, workingDir: String, timeoutMs: Int): Map<String, Any> {
         val envDir = File(envRoot, envId)
-        val prootExecutable = listOf(
-            File(prootPath), // Main, executable path
-            File(binDir, "proot")      // Legacy fallback path
-        ).firstOrNull { it.exists() }
-
+        val proot  = File(applicationInfo.nativeLibraryDir, "libproot.so") // nativeLibraryDir is executable unlike filesDir
         val tmpDir = File(envDir, "tmp").also { it.mkdirs() }
 
-        if (prootExecutable == null) return mapOf("stdout" to "", "stderr" to "proot not found — run setup again", "exitCode" to -1)
+        if (!proot.exists()) return mapOf("stdout" to "", "stderr" to "proot not found — run setup again", "exitCode" to -1)
 
         val shell = when {
             File(envDir, "bin/bash").exists()     -> "/bin/bash"
@@ -538,24 +602,18 @@ class MainActivity : FlutterActivity() {
         }
 
         val cmd = mutableListOf(
-            prootExecutable.absolutePath,
-            "--kill-on-exit",
+            proot.absolutePath, "--kill-on-exit",
             "-r", envDir.absolutePath,
             "-w", workingDir,
-            "-b", "/dev",
-            "-b", "/proc",
-            "-b", "/sys",
-            "-0", // Use as the final option before the command
-            shell,
-            "-c",
-            command
+            "-b", "/dev", "-b", "/proc", "-b", "/sys",
+            "-0", shell, "-c", command
         )
 
+        // Use ProcessBuilder.environment() instead of proot's --env flag
+        // (--env was added in proot v5.3.0; older builds don't support it)
         val pb = ProcessBuilder(cmd).apply {
             directory(filesDir)
             redirectErrorStream(false)
-
-            // Use ProcessBuilder environment map - works on all proot versions
             environment().apply {
                 put("HOME", "/root")
                 put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
@@ -564,10 +622,9 @@ class MainActivity : FlutterActivity() {
                 put("PROOT_TMP_DIR", tmpDir.absolutePath)
                 put("PYTHONDONTWRITEBYTECODE", "1")
                 put("PIP_NO_CACHE_DIR", "off")
-                put("PROOT_NO_SECCOMP", "1") // Fix for seccomp issues on some kernels
+                put("PROOT_NO_SECCOMP", "1")   // helps on some Android kernels
             }
         }
-
         val process = pb.start(); currentProcess = process
 
         val stdout = StringBuilder(); val stderr = StringBuilder()
