@@ -165,7 +165,7 @@ class MainActivity : FlutterActivity() {
                 val archName = if (arch == "x86_64") "x86_64" else "aarch64"
 
                 // Simple regex to find asset URLs containing our arch name
-                val urlPattern = Regex("\"browser_download_url\":\\s*\"(https://[^\"]*proot[^\"]*$archName[^\"]*)\"")
+                val urlPattern = Regex("\"browser_download_url\":\\s*\"([^"]*proot[^"]*$archName[^"]*)\"")
                 val match = urlPattern.find(json)
 
                 if (match != null) {
@@ -538,21 +538,36 @@ class MainActivity : FlutterActivity() {
         }
 
         val cmd = mutableListOf(
-            prootExecutable.absolutePath, "--kill-on-exit",
+            prootExecutable.absolutePath,
+            "--kill-on-exit",
             "-r", envDir.absolutePath,
             "-w", workingDir,
-            "-b", "/dev", "-b", "/proc", "-b", "/sys",
-            "--env", "HOME=/root",
-            "--env", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "--env", "LANG=C.UTF-8",
-            "--env", "TERM=xterm-256color",
-            "--env", "PROOT_TMP_DIR=${tmpDir.absolutePath}",
-            "--env", "PYTHONDONTWRITEBYTECODE=1",
-            "--env", "PIP_NO_CACHE_DIR=off",
-            "-0", shell, "-c", command
+            "-b", "/dev",
+            "-b", "/proc",
+            "-b", "/sys",
+            "-0", // Use as the final option before the command
+            shell,
+            "-c",
+            command
         )
 
-        val pb = ProcessBuilder(cmd).apply { directory(filesDir); redirectErrorStream(false) }
+        val pb = ProcessBuilder(cmd).apply {
+            directory(filesDir)
+            redirectErrorStream(false)
+
+            // Use ProcessBuilder environment map - works on all proot versions
+            environment().apply {
+                put("HOME", "/root")
+                put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                put("LANG", "C.UTF-8")
+                put("TERM", "xterm-256color")
+                put("PROOT_TMP_DIR", tmpDir.absolutePath)
+                put("PYTHONDONTWRITEBYTECODE", "1")
+                put("PIP_NO_CACHE_DIR", "off")
+                put("PROOT_NO_SECCOMP", "1") // Fix for seccomp issues on some kernels
+            }
+        }
+
         val process = pb.start(); currentProcess = process
 
         val stdout = StringBuilder(); val stderr = StringBuilder()
