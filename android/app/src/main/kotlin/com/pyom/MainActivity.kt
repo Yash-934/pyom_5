@@ -165,7 +165,7 @@ class MainActivity : FlutterActivity() {
                 val archName = if (arch == "x86_64") "x86_64" else "aarch64"
 
                 // Simple regex to find asset URLs containing our arch name
-                val urlPattern = Regex("\"browser_download_url\":\\s*\"([^"]*proot[^"]*$archName[^"]*)\"")
+                val urlPattern = Regex("\"browser_download_url\":\\s*\"(https://[^\"]*proot[^\"]*$archName[^\"]*)\"")
                 val match = urlPattern.find(json)
 
                 if (match != null) {
